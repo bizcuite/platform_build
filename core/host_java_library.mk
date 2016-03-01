@@ -43,11 +43,7 @@ LOCAL_INTERMEDIATE_TARGETS += \
 include $(BUILD_SYSTEM)/base_rules.mk
 #######################################
 
-java_sources := $(addprefix $(LOCAL_PATH)/, $(filter %.java,$(LOCAL_SRC_FILES))) \
-                $(filter %.java,$(LOCAL_GENERATED_SOURCES))
-all_java_sources := $(java_sources)
-
-include $(BUILD_SYSTEM)/java_common.mk
+$(LOCAL_INTERMEDIATE_TARGETS): PRIVATE_RMTYPEDEFS :=
 
 ifeq (true,$(LOCAL_EMMA_INSTRUMENT))
 $(full_classes_emma_jar): PRIVATE_EMMA_COVERAGE_FILE := $(intermediates.COMMON)/coverage.em
@@ -65,7 +61,7 @@ $(full_classes_emma_jar) : $(full_classes_compiled_jar) | $(EMMA_JAR)
 	$(transform-classes.jar-to-emma)
 
 $(built_javalib_jar) : $(full_classes_emma_jar)
-	@echo Copying: $@
+	@echo -e ${CL_YLW}"Copying:"${CL_RST}" $@"
 	$(hide) $(ACP) -fp $< $@
 
 else # LOCAL_EMMA_INSTRUMENT
@@ -73,12 +69,13 @@ else # LOCAL_EMMA_INSTRUMENT
 full_classes_compiled_jar := $(built_javalib_jar)
 endif # LOCAL_EMMA_INSTRUMENT
 
+$(full_classes_compiled_jar): PRIVATE_JAVAC_DEBUG_FLAGS := -g
 # The layers file allows you to enforce a layering between java packages.
 # Run build/tools/java-layers.py for more details.
 layers_file := $(addprefix $(LOCAL_PATH)/, $(LOCAL_JAVA_LAYERS_FILE))
 
 $(full_classes_compiled_jar): PRIVATE_JAVA_LAYERS_FILE := $(layers_file)
-$(full_classes_compiled_jar): PRIVATE_JAVACFLAGS := $(GLOBAL_JAVAC_DEBUG_FLAGS) $(LOCAL_JAVACFLAGS)
+$(full_classes_compiled_jar): PRIVATE_JAVACFLAGS := $(LOCAL_JAVACFLAGS)
 $(full_classes_compiled_jar): PRIVATE_JAR_EXCLUDE_FILES :=
 $(full_classes_compiled_jar): PRIVATE_JAR_PACKAGES :=
 $(full_classes_compiled_jar): PRIVATE_JAR_EXCLUDE_PACKAGES :=
@@ -88,6 +85,6 @@ $(full_classes_compiled_jar): \
         $(full_java_lib_deps) \
         $(jar_manifest_file) \
         $(proto_java_sources_file_stamp) \
-        $(LOCAL_MODULE_MAKEFILE_DEP) \
+        $(LOCAL_MODULE_MAKEFILE) \
         $(LOCAL_ADDITIONAL_DEPENDENCIES)
 	$(transform-host-java-to-package)

@@ -44,10 +44,7 @@ include $(BUILD_SYSTEM)/binary.mk
 relocation_packer_input := $(linked_module)
 relocation_packer_output := $(intermediates)/PACKED/$(my_built_module_stem)
 
-my_pack_module_relocations := false
-ifneq ($(DISABLE_RELOCATION_PACKER),true)
-    my_pack_module_relocations := $(LOCAL_PACK_MODULE_RELOCATIONS)
-endif
+my_pack_module_relocations := $(LOCAL_PACK_MODULE_RELOCATIONS)
 
 ifeq ($(my_pack_module_relocations),)
   my_pack_module_relocations := $($(LOCAL_2ND_ARCH_VAR_PREFIX)TARGET_PACK_MODULE_RELOCATIONS)
@@ -57,6 +54,14 @@ endif
 # non-zero p_vaddr which causes kernel to load executables to lower
 # address (starting at 0x8000) http://b/20665974
 ifeq ($(LOCAL_MODULE_CLASS),EXECUTABLES)
+  my_pack_module_relocations := false
+endif
+
+# Likewise for recovery and utility executables
+ifeq ($(LOCAL_MODULE_CLASS),RECOVERY_EXECUTABLES)
+  my_pack_module_relocations := false
+endif
+ifeq ($(LOCAL_MODULE_CLASS),UTILITY_EXECUTABLES)
   my_pack_module_relocations := false
 endif
 
@@ -86,23 +91,9 @@ endif
 symbolic_input := $(relocation_packer_output)
 symbolic_output := $(my_unstripped_path)/$(my_installed_module_stem)
 $(symbolic_output) : $(symbolic_input) | $(ACP)
-	@echo "target Symbolic: $(PRIVATE_MODULE) ($@)"
+	@echo -e ${CL_GRN}"target Symbolic:"${CL_RST}" $(PRIVATE_MODULE) ($@)"
 	$(copy-file-to-target)
 
-###########################################################
-## Store breakpad symbols
-###########################################################
-
-ifeq ($(BREAKPAD_GENERATE_SYMBOLS),true)
-my_breakpad_path := $(TARGET_OUT_BREAKPAD)/$(patsubst $(PRODUCT_OUT)/%,%,$(my_module_path))
-breakpad_input := $(relocation_packer_output)
-breakpad_output := $(my_breakpad_path)/$(my_installed_module_stem).sym
-$(breakpad_output) : $(breakpad_input) | $(BREAKPAD_DUMP_SYMS)
-	@echo "target breakpad: $(PRIVATE_MODULE) ($@)"
-	@mkdir -p $(dir $@)
-	$(hide) $(BREAKPAD_DUMP_SYMS) -c $< > $@
-$(LOCAL_BUILT_MODULE) : $(breakpad_output)
-endif
 
 ###########################################################
 ## Strip
@@ -149,17 +140,16 @@ else
 # use cp(1) instead.
 ifneq ($(LOCAL_ACP_UNAVAILABLE),true)
 $(strip_output): $(strip_input) | $(ACP)
-	@echo "target Unstripped: $(PRIVATE_MODULE) ($@)"
+	@echo -e ${CL_GRN}"target Unstripped:"${CL_RST}" $(PRIVATE_MODULE) ($@)"
 	$(copy-file-to-target)
 else
 $(strip_output): $(strip_input)
-	@echo "target Unstripped: $(PRIVATE_MODULE) ($@)"
+	@echo -e ${CL_GRN}"target Unstripped:"${CL_RST}" $(PRIVATE_MODULE) ($@)"
 	$(copy-file-to-target-with-cp)
 endif
 endif # my_strip_module
 
 $(cleantarget): PRIVATE_CLEAN_FILES += \
     $(linked_module) \
-    $(breakpad_output) \
     $(symbolic_output) \
     $(strip_output)

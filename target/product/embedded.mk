@@ -22,7 +22,6 @@ PRODUCT_PACKAGES += \
     adbd \
     atrace \
     bootanimation \
-    bootstat \
     debuggerd \
     dumpstate \
     dumpsys \
@@ -39,10 +38,8 @@ PRODUCT_PACKAGES += \
     libFFTEm \
     libGLESv1_CM \
     libGLESv2 \
-    libGLESv3 \
     libbinder \
     libc \
-    libc_malloc_debug \
     libcutils \
     libdl \
     libgui \
@@ -78,7 +75,7 @@ PRODUCT_PACKAGES += \
 # SELinux packages
 PRODUCT_PACKAGES += \
     sepolicy \
-    file_contexts.bin \
+    file_contexts \
     seapp_contexts \
     property_contexts \
     mac_permissions.xml \
@@ -93,5 +90,6 @@ PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
 PRODUCT_COPY_FILES += \
     system/core/rootdir/init.usb.rc:root/init.usb.rc \
     system/core/rootdir/init.usb.configfs.rc:root/init.usb.configfs.rc \
+    system/core/rootdir/init.trace.rc:root/init.trace.rc \
     system/core/rootdir/ueventd.rc:root/ueventd.rc \
     system/core/rootdir/etc/hosts:system/etc/hosts

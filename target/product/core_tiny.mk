@@ -36,6 +36,9 @@ PRODUCT_PACKAGES += \
     power.default
 
 PRODUCT_PACKAGES += \
+    local_time.default
+
+PRODUCT_PACKAGES += \
     BackupRestoreConfirmation \
     DefaultContainerService \
     SettingsProvider \
@@ -52,15 +55,16 @@ PRODUCT_PACKAGES += \
     ip6tables \
     iptables \
     gatekeeperd \
+    javax.btobex \
     keystore \
     keystore.default \
-    ld.mc \
     libOpenMAXAL \
     libOpenSLES \
     libdownmix \
     libfilterfw \
     libgatekeeper \
     libkeystore \
+    libsqlite_jni \
     libwilhelm \
     libdrmframework_jni \
     libdrmframework \
@@ -79,7 +83,6 @@ PRODUCT_PACKAGES += \
 
 # The order matters
 PRODUCT_BOOT_JARS := \
-    core-oj \
     core-libart \
     conscrypt \
     okhttp \

@@ -18,11 +18,9 @@
 
 PRODUCT_PACKAGES += \
     apache-xml \
-    ahat \
     bouncycastle \
     cacerts \
     conscrypt \
-    core-oj \
     core-junit \
     core-libart \
     dalvikvm \
@@ -40,8 +38,6 @@ PRODUCT_PACKAGES += \
     libicui18n \
     libicuuc \
     libjavacore \
-    libopenjdk \
-    libopenjdkjvm \
     libnativehelper \
     libssl \
     libz \

@@ -176,7 +176,7 @@ endif # LOCAL_JACK_ENABLED
 ifeq (true,$(EMMA_INSTRUMENT))
 ifndef LOCAL_EMMA_INSTRUMENT
 # No emma for test apks.
-ifeq (,$(LOCAL_INSTRUMENTATION_FOR))
+ifeq (,$(filer tests,$(LOCAL_MODULE_TAGS))$(LOCAL_INSTRUMENTATION_FOR))
 LOCAL_EMMA_INSTRUMENT := true
 endif # No test apk
 endif # LOCAL_EMMA_INSTRUMENT is not set
@@ -186,22 +186,12 @@ endif # EMMA_INSTRUMENT is true
 
 ifeq (true,$(LOCAL_EMMA_INSTRUMENT))
 ifeq (true,$(EMMA_INSTRUMENT_STATIC))
-ifdef LOCAL_JACK_ENABLED
-# Jack supports coverage with Jacoco
-LOCAL_STATIC_JAVA_LIBRARIES += jacocoagent
-else
 LOCAL_STATIC_JAVA_LIBRARIES += emma
-endif # LOCAL_JACK_ENABLED
 else
 ifdef LOCAL_SDK_VERSION
 ifdef TARGET_BUILD_APPS
 # In unbundled build merge the emma library into the apk.
-ifdef LOCAL_JACK_ENABLED
-# Jack supports coverage with Jacoco
-LOCAL_STATIC_JAVA_LIBRARIES += jacocoagent
-else
 LOCAL_STATIC_JAVA_LIBRARIES += emma
-endif # LOCAL_JACK_ENABLED
 else
 # If build against the SDK in full build, core.jar is not used,
 # we have to use prebiult emma.jar to make Proguard happy;
@@ -251,7 +241,7 @@ $(R_file_stamp): PRIVATE_RESOURCE_PUBLICS_OUTPUT := \
 $(R_file_stamp): PRIVATE_PROGUARD_OPTIONS_FILE := $(proguard_options_file)
 $(R_file_stamp): $(all_res_assets) $(full_android_manifest) $(RenderScript_file_stamp) $(AAPT) | $(ACP)
 	@echo "target R.java/Manifest.java: $(PRIVATE_MODULE) ($@)"
-	@rm -rf $@ && mkdir -p $(dir $@)
+	@rm -f $@
 	$(create-resource-java-files)
 	$(hide) for GENERATED_MANIFEST_FILE in `find $(PRIVATE_SOURCE_INTERMEDIATES_DIR) \
 					-name Manifest.java 2> /dev/null`; do \
@@ -266,10 +256,7 @@ $(R_file_stamp): $(all_res_assets) $(full_android_manifest) $(RenderScript_file_
 		$(ACP) -fp $$GENERATED_R_FILE $(TARGET_COMMON_OUT_ROOT)/R/$$dir \
 			|| exit 31; \
 		$(ACP) -fp $$GENERATED_R_FILE $@ || exit 32; \
-	done;
-	@# Ensure that the target file is always created, i.e. also in case we did not
-	@# enter the GENERATED_R_FILE-loop above. This avoids unnecessary rebuilding.
-	$(hide) touch $@
+	done; \
 
 $(proguard_options_file): $(R_file_stamp)
 
@@ -333,11 +320,24 @@ framework_res_package_export_deps := $(framework_res_package_export)
 else # LOCAL_SDK_RES_VERSION
 framework_res_package_export := \
     $(call intermediates-dir-for,APPS,framework-res,,COMMON)/package-export.apk
+
+# Avoid possible circular dependency with our platform-res
+#ifneq ($(LOCAL_IGNORE_SUBDIR), true)
+#cm_plat_res_package_export := \
+    $(call intermediates-dir-for,APPS,org.cyanogenmod.platform-res,,COMMON)/package-export.apk
+#endif # LOCAL_IGNORE_SUBDIR
+
 # We can't depend directly on the export.apk file; it won't get its
 # PRIVATE_ vars set up correctly if we do.  Instead, depend on the
 # corresponding R.stamp file, which lists the export.apk as a dependency.
 framework_res_package_export_deps := \
     $(dir $(framework_res_package_export))src/R.stamp
+
+#ifneq ($(LOCAL_IGNORE_SUBDIR), true)
+#cm_plat_res_package_export_deps := \
+#    $(dir $(cm_plat_res_package_export))src/R.stamp
+#endif # LOCAL_IGNORE_SUBDIR
+
 endif # LOCAL_SDK_RES_VERSION
 all_library_res_package_exports := \
     $(framework_res_package_export) \
@@ -348,6 +348,13 @@ all_library_res_package_export_deps := \
     $(framework_res_package_export_deps) \
     $(foreach lib,$(LOCAL_RES_LIBRARIES),\
         $(call intermediates-dir-for,APPS,$(lib),,COMMON)/src/R.stamp)
+
+#ifneq ($(LOCAL_IGNORE_SUBDIR), true)
+#all_library_res_package_exports += \
+#    $(cm_plat_res_package_export)
+#all_library_res_package_export_deps += \
+#    $(cm_plat_res_package_export_deps)
+#endif # LOCAL_IGNORE_SUBDIR
 
 $(resource_export_package) $(R_file_stamp) $(LOCAL_BUILT_MODULE): $(all_library_res_package_export_deps)
 $(LOCAL_INTERMEDIATE_TARGETS): \
@@ -400,7 +407,7 @@ $(LOCAL_BUILT_MODULE): PRIVATE_ADDITIONAL_CERTIFICATES := $(foreach c,\
     $(LOCAL_ADDITIONAL_CERTIFICATES), $(c).x509.pem $(c).pk8)
 
 # Define the rule to build the actual package.
-$(LOCAL_BUILT_MODULE): $(AAPT)
+$(LOCAL_BUILT_MODULE): $(AAPT) | $(ZIPALIGN)
 # PRIVATE_JNI_SHARED_LIBRARIES is a list of <abi>:<path_of_built_lib>.
 $(LOCAL_BUILT_MODULE): PRIVATE_JNI_SHARED_LIBRARIES := $(jni_shared_libraries_with_abis)
 # PRIVATE_JNI_SHARED_LIBRARIES_ABI is a list of ABI names.
@@ -449,6 +456,8 @@ ifneq (nostripping,$(LOCAL_DEX_PREOPT))
 endif
 endif
 	$(sign-package)
+	@# Alignment must happen after all other zip operations.
+	$(align-package)
 
 ###############################
 ## Build dpi-specific apks, if it's apps_only build.
@@ -483,7 +492,7 @@ built_apk_splits := $(foreach s,$(my_split_suffixes),$(built_module_path)/packag
 installed_apk_splits := $(foreach s,$(my_split_suffixes),$(my_module_path)/$(LOCAL_MODULE)_$(s).apk)
 
 # The splits should have been built in the same command building the base apk.
-# This rule just runs signing.
+# This rule just runs signing and zipalign etc.
 # Note that we explicily check the existence of the split apk and remove the
 # built base apk if the split apk isn't there.
 # That way the build system will rerun the aapt after the user changes the splitting parameters.
@@ -495,6 +504,7 @@ $(built_apk_splits) : $(built_module_path)/%.apk : $(LOCAL_BUILT_MODULE)
 	  rm $<; exit 1; \
 	fi
 	$(sign-package)
+	$(align-package)
 
 # Rules to install the splits
 $(installed_apk_splits) : $(my_module_path)/$(LOCAL_MODULE)_%.apk : $(built_module_path)/package_%.apk | $(ACP)
@@ -518,6 +528,39 @@ PACKAGES.$(LOCAL_PACKAGE_NAME).RESOURCE_OVERLAYS := $(package_resource_overlays)
 endif
 
 PACKAGES := $(PACKAGES) $(LOCAL_PACKAGE_NAME)
+
+# Dist the files that can be bundled in system.img.
+# They include the jni shared libraries and the apk with jni libraries stripped.
+ifeq ($(LOCAL_DIST_BUNDLED_BINARIES),true)
+ifneq ($(filter $(LOCAL_PACKAGE_NAME),$(TARGET_BUILD_APPS)),)
+ifneq ($(strip $(jni_shared_libraries)),)
+dist_subdir := bundled_$(LOCAL_PACKAGE_NAME)
+$(foreach f, $(jni_shared_libraries), \
+  $(call dist-for-goals, apps_only, $(f):$(dist_subdir)/$(notdir $(f))))
+
+apk_jni_stripped := $(intermediates)/jni_stripped/package.apk
+$(apk_jni_stripped): PRIVATE_JNI_SHARED_LIBRARIES := $(notdir $(jni_shared_libraries))
+$(apk_jni_stripped) : $(LOCAL_BUILT_MODULE) | $(ZIPALIGN)
+	@rm -rf $(dir $@) && mkdir -p $(dir $@)
+	$(hide) cp $< $@
+	$(hide) zip -d $@ $(foreach f,$(PRIVATE_JNI_SHARED_LIBRARIES),\*/$(f))
+	$(align-package)
+
+$(call dist-for-goals, apps_only, $(apk_jni_stripped):$(dist_subdir)/$(LOCAL_PACKAGE_NAME).apk)
+
+endif  # jni_shared_libraries
+endif  # apps_only build
+endif  # LOCAL_DIST_BUNDLED_BINARIES
+
+# Lint phony targets
+.PHONY: lint-$(LOCAL_PACKAGE_NAME)
+lint-$(LOCAL_PACKAGE_NAME): PRIVATE_PATH := $(LOCAL_PATH)
+lint-$(LOCAL_PACKAGE_NAME): PRIVATE_LINT_FLAGS := $(LOCAL_LINT_FLAGS)
+lint-$(LOCAL_PACKAGE_NAME) :
+	@echo lint $(PRIVATE_PATH)
+	$(LINT) $(PRIVATE_LINT_FLAGS) $(PRIVATE_PATH)
+
+lintall : lint-$(LOCAL_PACKAGE_NAME)
 
 endif # skip_definition
 

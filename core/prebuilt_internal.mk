@@ -26,14 +26,11 @@ ifdef LOCAL_PREBUILT_MODULE_FILE
 else
   ifdef LOCAL_SRC_FILES_$($(my_prefix)$(LOCAL_2ND_ARCH_VAR_PREFIX)ARCH)
     my_prebuilt_src_file := $(LOCAL_PATH)/$(LOCAL_SRC_FILES_$($(my_prefix)$(LOCAL_2ND_ARCH_VAR_PREFIX)ARCH))
-    LOCAL_SRC_FILES_$($(my_prefix)$(LOCAL_2ND_ARCH_VAR_PREFIX)ARCH) :=
   else
     ifdef LOCAL_SRC_FILES_$(my_32_64_bit_suffix)
       my_prebuilt_src_file := $(LOCAL_PATH)/$(LOCAL_SRC_FILES_$(my_32_64_bit_suffix))
-      LOCAL_SRC_FILES_$(my_32_64_bit_suffix) :=
     else
       my_prebuilt_src_file := $(LOCAL_PATH)/$(LOCAL_SRC_FILES)
-      LOCAL_SRC_FILES :=
     endif
   endif
 endif
@@ -49,10 +46,6 @@ ifeq (SHARED_LIBRARIES,$(LOCAL_MODULE_CLASS))
 
   ifeq ($(LOCAL_IS_HOST_MODULE)$(LOCAL_PACK_MODULE_RELOCATIONS),)
     # Do not pack relocations by default
-    LOCAL_PACK_MODULE_RELOCATIONS := false
-  endif
-
-  ifeq ($(DISABLE_RELOCATION_PACKER),true)
     LOCAL_PACK_MODULE_RELOCATIONS := false
   endif
 endif
@@ -95,7 +88,7 @@ else  # LOCAL_STRIP_MODULE and LOCAL_PACK_MODULE_RELOCATIONS not true
 ifdef prebuilt_module_is_a_library
 export_includes := $(intermediates)/export_includes
 $(export_includes): PRIVATE_EXPORT_C_INCLUDE_DIRS := $(LOCAL_EXPORT_C_INCLUDE_DIRS)
-$(export_includes) : $(LOCAL_MODULE_MAKEFILE_DEP)
+$(export_includes) : $(LOCAL_MODULE_MAKEFILE)
 	@echo Export includes file: $< -- $@
 	$(hide) mkdir -p $(dir $@) && rm -f $@
 ifdef LOCAL_EXPORT_C_INCLUDE_DIRS
@@ -216,9 +209,11 @@ embedded_prebuilt_jni_libs := 'lib/*.so'
 endif
 $(built_module): PRIVATE_EMBEDDED_JNI_LIBS := $(embedded_prebuilt_jni_libs)
 
-$(built_module) : $(my_prebuilt_src_file) | $(ACP) $(ZIPALIGN) $(SIGNAPK_JAR) $(AAPT)
+$(built_module) : $(my_prebuilt_src_file) | $(ACP) $(ZIPALIGN) $(SIGNAPK_JAR)
 	$(transform-prebuilt-to-target)
+ifneq ($(LOCAL_MODULE_PATH),$(TARGET_OUT_VENDOR)/bundled-app)
 	$(uncompress-shared-libs)
+endif
 ifneq ($(LOCAL_CERTIFICATE),PRESIGNED)
 	@# Only strip out files if we can re-sign the package.
 ifdef LOCAL_DEX_PREOPT
@@ -227,10 +222,8 @@ ifneq (nostripping,$(LOCAL_DEX_PREOPT))
 endif
 endif
 	$(sign-package)
-	# No need for align-package because sign-package takes care of alignment
-else
-	$(align-package)
 endif
+	$(align-package)
 
 ###############################
 ## Rule to build the odex file
@@ -246,7 +239,7 @@ ifdef LOCAL_PACKAGE_SPLITS
 built_apk_splits := $(addprefix $(built_module_path)/,$(notdir $(LOCAL_PACKAGE_SPLITS)))
 installed_apk_splits := $(addprefix $(my_module_path)/,$(notdir $(LOCAL_PACKAGE_SPLITS)))
 
-# Rules to sign the split apks.
+# Rules to sign and zipalign the split apks.
 my_src_dir := $(sort $(dir $(LOCAL_PACKAGE_SPLITS)))
 ifneq (1,$(words $(my_src_dir)))
 $(error You must put all the split source apks in the same folder: $(LOCAL_PACKAGE_SPLITS))
@@ -255,13 +248,14 @@ my_src_dir := $(LOCAL_PATH)/$(my_src_dir)
 
 $(built_apk_splits) : PRIVATE_PRIVATE_KEY := $(LOCAL_CERTIFICATE).pk8
 $(built_apk_splits) : PRIVATE_CERTIFICATE := $(LOCAL_CERTIFICATE).x509.pem
-$(built_apk_splits) : $(built_module_path)/%.apk : $(my_src_dir)/%.apk | $(ACP) $(AAPT)
+$(built_apk_splits) : $(built_module_path)/%.apk : $(my_src_dir)/%.apk | $(ACP)
 	$(copy-file-to-new-target)
 	$(sign-package)
+	$(align-package)
 
 # Rules to install the split apks.
 $(installed_apk_splits) : $(my_module_path)/%.apk : $(built_module_path)/%.apk | $(ACP)
-	@echo "Install: $@"
+	@echo -e ${CL_CYN}"Install: $@"${CL_RST}
 	$(copy-file-to-new-target)
 
 # Register the additional built and installed files.
@@ -279,13 +273,8 @@ ifneq ($(LOCAL_PREBUILT_STRIP_COMMENTS),)
 $(built_module) : $(my_prebuilt_src_file)
 	$(transform-prebuilt-to-target-strip-comments)
 else
-ifneq ($(LOCAL_ACP_UNAVAILABLE),true)
 $(built_module) : $(my_prebuilt_src_file) | $(ACP)
 	$(transform-prebuilt-to-target)
-else
-$(built_module) : $(my_prebuilt_src_file)
-	$(copy-file-to-target-with-cp)
-endif
 endif
 endif # LOCAL_MODULE_CLASS != APPS
 
@@ -319,30 +308,18 @@ $(common_classes_jar) : $(my_src_jar) | $(ACP)
 $(common_javalib_jar) : $(common_classes_jar) | $(ACP)
 	$(transform-prebuilt-to-target)
 
-$(call define-jar-to-toc-rule, $(common_classes_jar))
-
 # make sure the classes.jar and javalib.jar are built before $(LOCAL_BUILT_MODULE)
 $(built_module) : $(common_javalib_jar)
 endif # TARGET JAVA_LIBRARIES
 
 ifeq ($(LOCAL_MODULE_CLASS),JAVA_LIBRARIES)
-
-ifneq ($(LOCAL_JILL_FLAGS),)
-$(error LOCAL_JILL_FLAGS is not supported any more, please use jack options in LOCAL_JACK_FLAGS instead)
-endif
-
-$(intermediates.COMMON)/classes.jack : PRIVATE_JACK_FLAGS:=$(LOCAL_JACK_FLAGS)
-$(intermediates.COMMON)/classes.jack : $(my_src_jar) $(LOCAL_MODULE_MAKEFILE_DEP) \
-        $(LOCAL_ADDITIONAL_DEPENDENCIES) $(JACK) | setup-jack-server
+$(intermediates.COMMON)/classes.jack : PRIVATE_JILL_FLAGS:=$(LOCAL_JILL_FLAGS)
+$(intermediates.COMMON)/classes.jack : $(my_src_jar) $(LOCAL_MODULE_MAKEFILE) \
+        $(LOCAL_ADDITIONAL_DEPENDENCIES) $(JILL_JAR) $(JACK_JAR) $(JACK_LAUNCHER_JAR)
 	$(transform-jar-to-jack)
-
-# Update timestamps of .toc files for prebuilts so dependents will be
-# always rebuilt.
-$(intermediates.COMMON)/classes.dex.toc: $(intermediates.COMMON)/classes.jack
-	touch $@
 
 endif # JAVA_LIBRARIES
 
-$(built_module) : $(LOCAL_MODULE_MAKEFILE_DEP) $(LOCAL_ADDITIONAL_DEPENDENCIES)
+$(built_module) : $(LOCAL_MODULE_MAKEFILE) $(LOCAL_ADDITIONAL_DEPENDENCIES)
 
 my_prebuilt_src_file :=

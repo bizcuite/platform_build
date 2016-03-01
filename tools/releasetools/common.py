@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import print_function
+
 import copy
 import errno
 import getopt
@@ -30,8 +32,20 @@ import time
 import zipfile
 
 import blockimgdiff
+import rangelib
 
 from hashlib import sha1 as sha1
+
+try:
+  raw_input
+except NameError:
+  raw_input = input
+
+
+def iteritems(obj):
+  if hasattr(obj, 'iteritems'):
+    return obj.iteritems()
+  return obj.items()
 
 
 class Options(object):
@@ -43,7 +57,6 @@ class Options(object):
 
     self.search_path = platform_search_path.get(sys.platform, None)
     self.signapk_path = "framework/signapk.jar"  # Relative to search_path
-    self.signapk_shared_library_path = "lib64"   # Relative to search_path
     self.extra_signapk_args = []
     self.java_path = "java"  # Use the one on the path by default.
     self.java_args = "-Xmx2048m" # JVM Args
@@ -62,9 +75,6 @@ class Options(object):
     self.source_info_dict = None
     self.target_info_dict = None
     self.worker_threads = None
-    # Stash size cannot exceed cache_size * threshold.
-    self.cache_size = None
-    self.stash_threshold = 0.8
 
 
 OPTIONS = Options()
@@ -72,6 +82,10 @@ OPTIONS = Options()
 
 # Values for "certificate" in apkcerts that mean special things.
 SPECIAL_CERT_STRINGS = ("PRESIGNED", "EXTERNAL")
+
+# Stash size cannot exceed cache_size * threshold.
+OPTIONS.cache_size = None
+OPTIONS.stash_threshold = 0.8
 
 
 class ExternalError(RuntimeError):
@@ -82,7 +96,7 @@ def Run(args, **kwargs):
   """Create and return a subprocess.Popen object, printing the command
   line on the terminal if -v was specified."""
   if OPTIONS.verbose:
-    print "  running: ", " ".join(args)
+    print("  running: ", " ".join(args))
   return subprocess.Popen(args, **kwargs)
 
 
@@ -102,7 +116,7 @@ def CloseInheritedPipes():
       pass
 
 
-def LoadInfoDict(input_file, input_dir=None):
+def LoadInfoDict(input_file):
   """Read and parse the META/misc_info.txt key/value pairs from the
   input target files and return a dict."""
 
@@ -153,35 +167,8 @@ def LoadInfoDict(input_file, input_dir=None):
   if "fstab_version" not in d:
     d["fstab_version"] = "1"
 
-  # A few properties are stored as links to the files in the out/ directory.
-  # It works fine with the build system. However, they are no longer available
-  # when (re)generating from target_files zip. If input_dir is not None, we
-  # are doing repacking. Redirect those properties to the actual files in the
-  # unzipped directory.
-  if input_dir is not None:
-    # We carry a copy of file_contexts.bin under META/. If not available,
-    # search BOOT/RAMDISK/. Note that sometimes we may need a different file
-    # to build images than the one running on device, such as when enabling
-    # system_root_image. In that case, we must have the one for image
-    # generation copied to META/.
-    fc_basename = os.path.basename(d.get("selinux_fc", "file_contexts"))
-    fc_config = os.path.join(input_dir, "META", fc_basename)
-    if d.get("system_root_image") == "true":
-      assert os.path.exists(fc_config)
-    if not os.path.exists(fc_config):
-      fc_config = os.path.join(input_dir, "BOOT", "RAMDISK", fc_basename)
-      if not os.path.exists(fc_config):
-        fc_config = None
-
-    if fc_config:
-      d["selinux_fc"] = fc_config
-
-    # Similarly we need to redirect "ramdisk_dir" and "ramdisk_fs_config".
-    if d.get("system_root_image") == "true":
-      d["ramdisk_dir"] = os.path.join(input_dir, "ROOT")
-      d["ramdisk_fs_config"] = os.path.join(
-          input_dir, "META", "root_filesystem_config.txt")
-
+  if "device_type" not in d:
+    d["device_type"] = "MMC"
   try:
     data = read_helper("META/imagesizes.txt")
     for line in data.split("\n"):
@@ -211,11 +198,7 @@ def LoadInfoDict(input_file, input_dir=None):
   makeint("boot_size")
   makeint("fstab_version")
 
-  if d.get("no_recovery", False) == "true":
-    d["fstab"] = None
-  else:
-    d["fstab"] = LoadRecoveryFSTab(read_helper, d["fstab_version"],
-                                   d.get("system_root_image", False))
+  d["fstab"] = LoadRecoveryFSTab(read_helper, d["fstab_version"], d["device_type"])
   d["build.prop"] = LoadBuildProp(read_helper)
   return d
 
@@ -223,7 +206,7 @@ def LoadBuildProp(read_helper):
   try:
     data = read_helper("SYSTEM/build.prop")
   except KeyError:
-    print "Warning: could not find SYSTEM/build.prop in %s" % zip
+    print("Warning: could not find SYSTEM/build.prop in %s" % zip)
     data = ""
   return LoadDictionaryFromLines(data.split("\n"))
 
@@ -238,7 +221,7 @@ def LoadDictionaryFromLines(lines):
       d[name] = value
   return d
 
-def LoadRecoveryFSTab(read_helper, fstab_version, system_root_image=False):
+def LoadRecoveryFSTab(read_helper, fstab_version, type):
   class Partition(object):
     def __init__(self, mount_point, fs_type, device, length, device2, context):
       self.mount_point = mount_point
@@ -251,7 +234,7 @@ def LoadRecoveryFSTab(read_helper, fstab_version, system_root_image=False):
   try:
     data = read_helper("RECOVERY/RAMDISK/etc/recovery.fstab")
   except KeyError:
-    print "Warning: could not find RECOVERY/RAMDISK/etc/recovery.fstab"
+    print("Warning: could not find RECOVERY/RAMDISK/etc/recovery.fstab")
     data = ""
 
   if fstab_version == 1:
@@ -283,11 +266,12 @@ def LoadRecoveryFSTab(read_helper, fstab_version, system_root_image=False):
           if i.startswith("length="):
             length = int(i[7:])
           else:
-            print "%s: unknown option \"%s\"" % (mount_point, i)
+            print("%s: unknown option \"%s\"" % (mount_point, i))
 
-      d[mount_point] = Partition(mount_point=mount_point, fs_type=pieces[1],
-                                 device=pieces[2], length=length,
-                                 device2=device2)
+      if not d.get(mount_point):
+          d[mount_point] = Partition(mount_point=mount_point, fs_type=pieces[1],
+                                     device=pieces[2], length=length,
+                                     device2=device2)
 
   elif fstab_version == 2:
     d = {}
@@ -323,107 +307,119 @@ def LoadRecoveryFSTab(read_helper, fstab_version, system_root_image=False):
           context = i
 
       mount_point = pieces[1]
-      d[mount_point] = Partition(mount_point=mount_point, fs_type=pieces[2],
-                                 device=pieces[0], length=length,
-                                 device2=None, context=context)
+      if not d.get(mount_point):
+          d[mount_point] = Partition(mount_point=mount_point, fs_type=pieces[2],
+                                     device=pieces[0], length=length,
+                                     device2=None, context=context)
 
   else:
     raise ValueError("Unknown fstab_version: \"%d\"" % (fstab_version,))
 
-  # / is used for the system mount point when the root directory is included in
-  # system. Other areas assume system is always at "/system" so point /system
-  # at /.
-  if system_root_image:
-    assert not d.has_key("/system") and d.has_key("/")
-    d["/system"] = d["/"]
   return d
 
 
 def DumpInfoDict(d):
   for k, v in sorted(d.items()):
-    print "%-25s = (%s) %s" % (k, type(v).__name__, v)
+    print("%-25s = (%s) %s" % (k, type(v).__name__, v))
 
 
-def _BuildBootableImage(sourcedir, fs_config_file, info_dict=None,
-                        has_ramdisk=False):
-  """Build a bootable image from the specified sourcedir.
+def BuildBootableImage(sourcedir, fs_config_file, info_dict=None):
+  """Take a kernel, cmdline, and ramdisk directory from the input (in
+  'sourcedir'), and turn them into a boot image.  Return the image
+  data, or None if sourcedir does not appear to contains files for
+  building the requested image."""
 
-  Take a kernel, cmdline, and optionally a ramdisk directory from the input (in
-  'sourcedir'), and turn them into a boot image.  Return the image data, or
-  None if sourcedir does not appear to contains files for building the
-  requested image."""
-
-  def make_ramdisk():
-    ramdisk_img = tempfile.NamedTemporaryFile()
-
-    if os.access(fs_config_file, os.F_OK):
-      cmd = ["mkbootfs", "-f", fs_config_file,
-             os.path.join(sourcedir, "RAMDISK")]
-    else:
-      cmd = ["mkbootfs", os.path.join(sourcedir, "RAMDISK")]
-    p1 = Run(cmd, stdout=subprocess.PIPE)
-    p2 = Run(["minigzip"], stdin=p1.stdout, stdout=ramdisk_img.file.fileno())
-
-    p2.wait()
-    p1.wait()
-    assert p1.returncode == 0, "mkbootfs of %s ramdisk failed" % (sourcedir,)
-    assert p2.returncode == 0, "minigzip of %s ramdisk failed" % (sourcedir,)
-
-    return ramdisk_img
-
-  if not os.access(os.path.join(sourcedir, "kernel"), os.F_OK):
-    return None
-
-  if has_ramdisk and not os.access(os.path.join(sourcedir, "RAMDISK"), os.F_OK):
+  if (not os.access(os.path.join(sourcedir, "RAMDISK"), os.F_OK) or
+      not os.access(os.path.join(sourcedir, "kernel"), os.F_OK)):
     return None
 
   if info_dict is None:
     info_dict = OPTIONS.info_dict
 
+  ramdisk_img = tempfile.NamedTemporaryFile()
   img = tempfile.NamedTemporaryFile()
 
-  if has_ramdisk:
-    ramdisk_img = make_ramdisk()
-
-  # use MKBOOTIMG from environ, or "mkbootimg" if empty or not set
-  mkbootimg = os.getenv('MKBOOTIMG') or "mkbootimg"
-
-  cmd = [mkbootimg, "--kernel", os.path.join(sourcedir, "kernel")]
-
-  fn = os.path.join(sourcedir, "second")
-  if os.access(fn, os.F_OK):
-    cmd.append("--second")
-    cmd.append(fn)
-
-  fn = os.path.join(sourcedir, "cmdline")
-  if os.access(fn, os.F_OK):
-    cmd.append("--cmdline")
-    cmd.append(open(fn).read().rstrip("\n"))
-
-  fn = os.path.join(sourcedir, "base")
-  if os.access(fn, os.F_OK):
-    cmd.append("--base")
-    cmd.append(open(fn).read().rstrip("\n"))
-
-  fn = os.path.join(sourcedir, "pagesize")
-  if os.access(fn, os.F_OK):
-    cmd.append("--pagesize")
-    cmd.append(open(fn).read().rstrip("\n"))
-
-  args = info_dict.get("mkbootimg_args", None)
-  if args and args.strip():
-    cmd.extend(shlex.split(args))
-
-  if has_ramdisk:
-    cmd.extend(["--ramdisk", ramdisk_img.name])
-
-  img_unsigned = None
-  if info_dict.get("vboot", None):
-    img_unsigned = tempfile.NamedTemporaryFile()
-    cmd.extend(["--output", img_unsigned.name])
+  if os.access(fs_config_file, os.F_OK):
+    cmd = ["mkbootfs", "-f", fs_config_file, os.path.join(sourcedir, "RAMDISK")]
   else:
-    cmd.extend(["--output", img.name])
+    cmd = ["mkbootfs", os.path.join(sourcedir, "RAMDISK")]
+  p1 = Run(cmd, stdout=subprocess.PIPE)
+  p2 = Run(["minigzip"],
+           stdin=p1.stdout, stdout=ramdisk_img.file.fileno())
 
+  p2.wait()
+  p1.wait()
+  assert p1.returncode == 0, "mkbootfs of %s ramdisk failed" % (sourcedir,)
+  assert p2.returncode == 0, "minigzip of %s ramdisk failed" % (sourcedir,)
+
+  """check if uboot is requested"""
+  fn = os.path.join(sourcedir, "ubootargs")
+  if os.access(fn, os.F_OK):
+    cmd = ["mkimage"]
+    for argument in open(fn).read().rstrip("\n").split(" "):
+      cmd.append(argument)
+    cmd.append("-d")
+    cmd.append(os.path.join(sourcedir, "kernel")+":"+ramdisk_img.name)
+    cmd.append(img.name)
+
+  else:
+    # use MKBOOTIMG from environ, or "mkbootimg" if empty or not set
+    mkbootimg = os.getenv('MKBOOTIMG') or "mkbootimg"
+    cmd = [mkbootimg, "--kernel", os.path.join(sourcedir, "kernel")]
+
+    fn = os.path.join(sourcedir, "second")
+    if os.access(fn, os.F_OK):
+      cmd.append("--second")
+      cmd.append(fn)
+
+    fn = os.path.join(sourcedir, "cmdline")
+    if os.access(fn, os.F_OK):
+      cmd.append("--cmdline")
+      cmd.append(open(fn).read().rstrip("\n"))
+
+    fn = os.path.join(sourcedir, "base")
+    if os.access(fn, os.F_OK):
+      cmd.append("--base")
+      cmd.append(open(fn).read().rstrip("\n"))
+
+    fn = os.path.join(sourcedir, "tagsaddr")
+    if os.access(fn, os.F_OK):
+      cmd.append("--tags-addr")
+      cmd.append(open(fn).read().rstrip("\n"))
+
+    fn = os.path.join(sourcedir, "tags_offset")
+    if os.access(fn, os.F_OK):
+      cmd.append("--tags_offset")
+      cmd.append(open(fn).read().rstrip("\n"))
+
+    fn = os.path.join(sourcedir, "ramdisk_offset")
+    if os.access(fn, os.F_OK):
+      cmd.append("--ramdisk_offset")
+      cmd.append(open(fn).read().rstrip("\n"))
+
+    fn = os.path.join(sourcedir, "dt")
+    if os.access(fn, os.F_OK):
+      cmd.append("--dt")
+      cmd.append(fn)
+
+    fn = os.path.join(sourcedir, "pagesize")
+    if os.access(fn, os.F_OK):
+      cmd.append("--pagesize")
+      cmd.append(open(fn).read().rstrip("\n"))
+
+    args = info_dict.get("mkbootimg_args", None)
+    if args and args.strip():
+      cmd.extend(shlex.split(args))
+
+    img_unsigned = None
+    if info_dict.get("vboot", None):
+      img_unsigned = tempfile.NamedTemporaryFile()
+      cmd.extend(["--ramdisk", ramdisk_img.name,
+                "--output", img_unsigned.name])
+    else:
+      cmd.extend(["--ramdisk", ramdisk_img.name,
+                "--output", img.name])
+  
   p = Run(cmd, stdout=subprocess.PIPE)
   p.communicate()
   assert p.returncode == 0, "mkbootimg of %s image failed" % (
@@ -462,8 +458,7 @@ def _BuildBootableImage(sourcedir, fs_config_file, info_dict=None,
   img.seek(os.SEEK_SET, 0)
   data = img.read()
 
-  if has_ramdisk:
-    ramdisk_img.close()
+  ramdisk_img.close()
   img.close()
 
   return data
@@ -471,38 +466,27 @@ def _BuildBootableImage(sourcedir, fs_config_file, info_dict=None,
 
 def GetBootableImage(name, prebuilt_name, unpack_dir, tree_subdir,
                      info_dict=None):
-  """Return a File object with the desired bootable image.
-
-  Look for it in 'unpack_dir'/BOOTABLE_IMAGES under the name 'prebuilt_name',
-  otherwise look for it under 'unpack_dir'/IMAGES, otherwise construct it from
-  the source files in 'unpack_dir'/'tree_subdir'."""
+  """Return a File object (with name 'name') with the desired bootable
+  image.  Look for it in 'unpack_dir'/BOOTABLE_IMAGES under the name
+  'prebuilt_name', otherwise look for it under 'unpack_dir'/IMAGES,
+  otherwise construct it from the source files in
+  'unpack_dir'/'tree_subdir'."""
 
   prebuilt_path = os.path.join(unpack_dir, "BOOTABLE_IMAGES", prebuilt_name)
   if os.path.exists(prebuilt_path):
-    print "using prebuilt %s from BOOTABLE_IMAGES..." % (prebuilt_name,)
+    print("using prebuilt %s from BOOTABLE_IMAGES..." % prebuilt_name)
     return File.FromLocalFile(name, prebuilt_path)
 
   prebuilt_path = os.path.join(unpack_dir, "IMAGES", prebuilt_name)
   if os.path.exists(prebuilt_path):
-    print "using prebuilt %s from IMAGES..." % (prebuilt_name,)
+    print("using prebuilt %s from IMAGES..." % prebuilt_name)
     return File.FromLocalFile(name, prebuilt_path)
 
-  print "building image from target_files %s..." % (tree_subdir,)
-
-  if info_dict is None:
-    info_dict = OPTIONS.info_dict
-
-  # With system_root_image == "true", we don't pack ramdisk into the boot image.
-  # Unless "recovery_as_boot" is specified, in which case we carry the ramdisk
-  # for recovery.
-  has_ramdisk = (info_dict.get("system_root_image") != "true" or
-                 prebuilt_name != "boot.img" or
-                 info_dict.get("recovery_as_boot") == "true")
-
+  print("building image from target_files %s..." % tree_subdir)
   fs_config = "META/" + tree_subdir.lower() + "_filesystem_config.txt"
-  data = _BuildBootableImage(os.path.join(unpack_dir, tree_subdir),
-                             os.path.join(unpack_dir, fs_config),
-                             info_dict, has_ramdisk)
+  data = BuildBootableImage(os.path.join(unpack_dir, tree_subdir),
+                            os.path.join(unpack_dir, fs_config),
+                            info_dict)
   if data:
     return File(name, data)
   return None
@@ -522,6 +506,7 @@ def UnzipTemp(filename, pattern=None):
   OPTIONS.tempfiles.append(tmp)
 
   def unzip_to_dir(filename, dirname):
+    subprocess.call(["rm", "-rf", dirname + filename, "targetfiles-*"])
     cmd = ["unzip", "-o", "-q", filename, "-d", dirname]
     if pattern is not None:
       cmd.append(pattern)
@@ -576,7 +561,7 @@ def GetKeyPasswords(keylist):
       if p.returncode == 0:
         # Encrypted key with empty string as password.
         key_passwords[k] = ''
-      elif stderr.startswith('Error decrypting key'):
+      elif stderr.startswith(b'Error decrypting key'):
         # Definitely encrypted key.
         # It would have said "Error reading key" if it didn't parse correctly.
         need_passwords.append(k)
@@ -591,84 +576,37 @@ def GetKeyPasswords(keylist):
   return key_passwords
 
 
-def GetMinSdkVersion(apk_name):
-  """Get the minSdkVersion delared in the APK. This can be both a decimal number
-  (API Level) or a codename.
-  """
-
-  p = Run(["aapt", "dump", "badging", apk_name], stdout=subprocess.PIPE)
-  output, err = p.communicate()
-  if err:
-    raise ExternalError("Failed to obtain minSdkVersion: aapt return code %s"
-        % (p.returncode,))
-
-  for line in output.split("\n"):
-    # Looking for lines such as sdkVersion:'23' or sdkVersion:'M'
-    m = re.match(r'sdkVersion:\'([^\']*)\'', line)
-    if m:
-      return m.group(1)
-  raise ExternalError("No minSdkVersion returned by aapt")
-
-
-def GetMinSdkVersionInt(apk_name, codename_to_api_level_map):
-  """Get the minSdkVersion declared in the APK as a number (API Level). If
-  minSdkVersion is set to a codename, it is translated to a number using the
-  provided map.
-  """
-
-  version = GetMinSdkVersion(apk_name)
-  try:
-    return int(version)
-  except ValueError:
-    # Not a decimal number. Codename?
-    if version in codename_to_api_level_map:
-      return codename_to_api_level_map[version]
-    else:
-      raise ExternalError("Unknown minSdkVersion: '%s'. Known codenames: %s"
-                          % (version, codename_to_api_level_map))
-
-
-def SignFile(input_name, output_name, key, password, min_api_level=None,
-    codename_to_api_level_map=dict(),
-    whole_file=False):
+def SignFile(input_name, output_name, key, password, align=None,
+             whole_file=False):
   """Sign the input_name zip/jar/apk, producing output_name.  Use the
   given key and password (the latter may be None if the key does not
   have a password.
 
+  If align is an integer > 1, zipalign is run to align stored files in
+  the output zip on 'align'-byte boundaries.
+
   If whole_file is true, use the "-w" option to SignApk to embed a
   signature that covers the whole file in the archive comment of the
   zip file.
-
-  min_api_level is the API Level (int) of the oldest platform this file may end
-  up on. If not specified for an APK, the API Level is obtained by interpreting
-  the minSdkVersion attribute of the APK's AndroidManifest.xml.
-
-  codename_to_api_level_map is needed to translate the codename which may be
-  encountered as the APK's minSdkVersion.
   """
 
-  java_library_path = os.path.join(
-      OPTIONS.search_path, OPTIONS.signapk_shared_library_path)
+  if align == 0 or align == 1:
+    align = None
 
-  cmd = [OPTIONS.java_path, OPTIONS.java_args,
-         "-Djava.library.path=" + java_library_path,
-         "-jar",
+  if align:
+    temp = tempfile.NamedTemporaryFile()
+    sign_name = temp.name
+  else:
+    sign_name = output_name
+
+  cmd = [OPTIONS.java_path, OPTIONS.java_args, "-jar",
          os.path.join(OPTIONS.search_path, OPTIONS.signapk_path)]
   cmd.extend(OPTIONS.extra_signapk_args)
   if whole_file:
     cmd.append("-w")
-
-  min_sdk_version = min_api_level
-  if min_sdk_version is None:
-    if not whole_file:
-      min_sdk_version = GetMinSdkVersionInt(
-          input_name, codename_to_api_level_map)
-  if min_sdk_version is not None:
-    cmd.extend(["--min-sdk-version", str(min_sdk_version)])
-
   cmd.extend([key + OPTIONS.public_key_suffix,
               key + OPTIONS.private_key_suffix,
-              input_name, output_name])
+              input_name, sign_name])
 
   p = Run(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
   if password is not None:
@@ -676,6 +614,13 @@ def SignFile(input_name, output_name, key, password, min_api_level=None,
   p.communicate(password)
   if p.returncode != 0:
     raise ExternalError("signapk.jar failed: return code %s" % (p.returncode,))
+
+  if align:
+    p = Run(["zipalign", "-f", "-p", str(align), sign_name, output_name])
+    p.communicate()
+    if p.returncode != 0:
+      raise ExternalError("zipalign failed: return code %s" % (p.returncode,))
+    temp.close()
 
 
 def CheckSize(data, target, info_dict):
@@ -690,8 +635,8 @@ def CheckSize(data, target, info_dict):
   fs_type = None
   limit = None
   if info_dict["fstab"]:
-    if mount_point == "/userdata":
-      mount_point = "/data"
+    if mount_point == "/userdata_extra": mount_point = "/data"
+    if mount_point == "/userdata": mount_point = "/data"
     p = info_dict["fstab"][mount_point]
     fs_type = p.fs_type
     device = p.device
@@ -711,11 +656,11 @@ def CheckSize(data, target, info_dict):
   if pct >= 99.0:
     raise ExternalError(msg)
   elif pct >= 95.0:
-    print
-    print "  WARNING: ", msg
-    print
+    print()
+    print("  WARNING: ", msg)
+    print()
   elif OPTIONS.verbose:
-    print "  ", msg
+    print("  ", msg)
 
 
 def ReadApkCerts(tf_zip):
@@ -764,8 +709,8 @@ COMMON_DOCSTRING = """
 """
 
 def Usage(docstring):
-  print docstring.rstrip("\n")
-  print COMMON_DOCSTRING
+  print(docstring.rstrip("\n"))
+  print(COMMON_DOCSTRING)
 
 
 def ParseOptions(argv,
@@ -781,8 +726,7 @@ def ParseOptions(argv,
   try:
     opts, args = getopt.getopt(
         argv, "hvp:s:x:" + extra_opts,
-        ["help", "verbose", "path=", "signapk_path=",
-         "signapk_shared_library_path=", "extra_signapk_args=",
+        ["help", "verbose", "path=", "signapk_path=", "extra_signapk_args=",
          "java_path=", "java_args=", "public_key_suffix=",
          "private_key_suffix=", "boot_signer_path=", "boot_signer_args=",
          "verity_signer_path=", "verity_signer_args=", "device_specific=",
@@ -790,7 +734,7 @@ def ParseOptions(argv,
         list(extra_long_opts))
   except getopt.GetoptError as err:
     Usage(docstring)
-    print "**", str(err), "**"
+    print("**", str(err), "**")
     sys.exit(2)
 
   for o, a in opts:
@@ -803,8 +747,6 @@ def ParseOptions(argv,
       OPTIONS.search_path = a
     elif o in ("--signapk_path",):
       OPTIONS.signapk_path = a
-    elif o in ("--signapk_shared_library_path",):
-      OPTIONS.signapk_shared_library_path = a
     elif o in ("--extra_signapk_args",):
       OPTIONS.extra_signapk_args = shlex.split(a)
     elif o in ("--java_path",):
@@ -888,7 +830,7 @@ class PasswordManager(object):
         current[i] = ""
 
       if not first:
-        print "key file %s still missing some passwords." % (self.pwfile,)
+        print("key file %s still missing some passwords." % self.pwfile)
         answer = raw_input("try to edit again? [y]> ").strip()
         if answer and answer[0] not in 'yY':
           raise RuntimeError("key passwords unavailable")
@@ -902,7 +844,7 @@ class PasswordManager(object):
     values.
     """
     result = {}
-    for k, v in sorted(current.iteritems()):
+    for k, v in sorted(iteritems(current)):
       if v:
         result[k] = v
       else:
@@ -923,7 +865,7 @@ class PasswordManager(object):
     f.write("# (Additional spaces are harmless.)\n\n")
 
     first_line = None
-    sorted_list = sorted([(not v, k, v) for (k, v) in current.iteritems()])
+    sorted_list = sorted((not v, k, v) for (k, v) in current.items())
     for i, (_, k, v) in enumerate(sorted_list):
       f.write("[[[  %s  ]]] %s\n" % (v, k))
       if not v and first_line is None:
@@ -948,13 +890,13 @@ class PasswordManager(object):
           continue
         m = re.match(r"^\[\[\[\s*(.*?)\s*\]\]\]\s*(\S+)$", line)
         if not m:
-          print "failed to parse password file: ", line
+          print("failed to parse password file: ", line)
         else:
           result[m.group(2)] = m.group(1)
       f.close()
     except IOError as e:
       if e.errno != errno.ENOENT:
-        print "error reading password file: ", str(e)
+        print("error reading password file: ", str(e))
     return result
 
 
@@ -1018,7 +960,7 @@ def ZipWriteStr(zip_file, zinfo_or_arcname, data, perms=None,
     zinfo = zipfile.ZipInfo(filename=zinfo_or_arcname)
     zinfo.compress_type = zip_file.compression
     if perms is None:
-      perms = 0o100644
+      perms = 0o644
   else:
     zinfo = zinfo_or_arcname
 
@@ -1028,9 +970,6 @@ def ZipWriteStr(zip_file, zinfo_or_arcname, data, perms=None,
 
   # If perms is given, it has a priority.
   if perms is not None:
-    # If perms doesn't set the file type, mark it as a regular file.
-    if perms & 0o770000 == 0:
-      perms |= 0o100000
     zinfo.external_attr = perms << 16
 
   # Use a fixed timestamp so the output is repeatable.
@@ -1058,7 +997,7 @@ class DeviceSpecificParams(object):
     """Keyword arguments to the constructor become attributes of this
     object, which is passed to all functions in the device-specific
     module."""
-    for k, v in kwargs.iteritems():
+    for k, v in iteritems(kwargs):
       setattr(self, k, v)
     self.extras = OPTIONS.extras
 
@@ -1075,10 +1014,10 @@ class DeviceSpecificParams(object):
           if x == ".py":
             f = b
           info = imp.find_module(f, [d])
-        print "loaded device-specific extensions from", path
+        print("loaded device-specific extensions from", path)
         self.module = imp.load_module("device_specific", *info)
       except ImportError:
-        print "unable to load device-specific module; assuming none"
+        print("unable to load device-specific module; assuming none")
 
   def _DoCall(self, function_name, *args, **kwargs):
     """Call the named function in the device-specific module, passing
@@ -1104,6 +1043,11 @@ class DeviceSpecificParams(object):
     """Called at the end of full OTA installation; typically this is
     used to install the image for the device's baseband processor."""
     return self._DoCall("FullOTA_InstallEnd")
+
+  def FullOTA_PostValidate(self):
+    """Called after installing and validating /system; typically this is
+    used to resize the system partition after a block based installation."""
+    return self._DoCall("FullOTA_PostValidate")
 
   def IncrementalOTA_Assertions(self):
     """Called after emitting the block of assertions at the top of an
@@ -1133,9 +1077,6 @@ class DeviceSpecificParams(object):
     this is used to install the image for the device's baseband
     processor."""
     return self._DoCall("IncrementalOTA_InstallEnd")
-
-  def VerifyOTA_Assertions(self):
-    return self._DoCall("VerifyOTA_Assertions")
 
 class File(object):
   def __init__(self, name, data):
@@ -1212,7 +1153,7 @@ class Difference(object):
       th.start()
       th.join(timeout=300)   # 5 mins
       if th.is_alive():
-        print "WARNING: diff command timed out"
+        print("WARNING: diff command timed out")
         p.terminate()
         th.join(5)
         if th.is_alive():
@@ -1220,8 +1161,8 @@ class Difference(object):
           th.join()
 
       if err or p.returncode != 0:
-        print "WARNING: failure running %s:\n%s\n" % (
-            diff_program, "".join(err))
+        print("WARNING: failure running %s:\n%s\n" % (
+            diff_program, "".join(err)))
         self.patch = None
         return None, None, None
       diff = ptemp.read()
@@ -1243,7 +1184,7 @@ class Difference(object):
 
 def ComputeDifferences(diffs):
   """Call ComputePatch on all the Difference objects in 'diffs'."""
-  print len(diffs), "diffs to compute"
+  print(len(diffs), "diffs to compute")
 
   # Do the largest files first, to try and reduce the long-pole effect.
   by_size = [(i.tf.size, i) for i in diffs]
@@ -1269,13 +1210,13 @@ def ComputeDifferences(diffs):
         else:
           name = "%s (%s)" % (tf.name, sf.name)
         if patch is None:
-          print "patching failed!                                  %s" % (name,)
+          print("patching failed!                                  %s" % name)
         else:
-          print "%8.2f sec %8d / %8d bytes (%6.2f%%) %s" % (
-              dur, len(patch), tf.size, 100.0 * len(patch) / tf.size, name)
+          print("%8.2f sec %8d / %8d bytes (%6.2f%%) %s" % (
+              dur, len(patch), tf.size, 100.0 * len(patch) / tf.size, name))
       lock.release()
     except Exception as e:
-      print e
+      print(e)
       raise
 
   # start worker threads; wait for them all to finish.
@@ -1295,6 +1236,9 @@ class BlockDifference(object):
     self.partition = partition
     self.check_first_block = check_first_block
 
+    # Due to http://b/20939131, check_first_block is disabled temporarily.
+    assert not self.check_first_block
+
     if version is None:
       version = 1
       if OPTIONS.info_dict:
@@ -1309,17 +1253,12 @@ class BlockDifference(object):
     OPTIONS.tempfiles.append(tmpdir)
     self.path = os.path.join(tmpdir, partition)
     b.Compute(self.path)
-    self._required_cache = b.max_stashed_size
 
     if src is None:
       _, self.device = GetTypeAndDevice("/" + partition, OPTIONS.info_dict)
     else:
       _, self.device = GetTypeAndDevice("/" + partition,
                                         OPTIONS.source_info_dict)
-
-  @property
-  def required_cache(self):
-    return self._required_cache
 
   def WriteScript(self, script, output_zip, progress=None):
     if not self.src:
@@ -1333,25 +1272,6 @@ class BlockDifference(object):
     self._WriteUpdate(script, output_zip)
     self._WritePostInstallVerifyScript(script)
 
-  def WriteStrictVerifyScript(self, script):
-    """Verify all the blocks in the care_map, including clobbered blocks.
-
-    This differs from the WriteVerifyScript() function: a) it prints different
-    error messages; b) it doesn't allow half-way updated images to pass the
-    verification."""
-
-    partition = self.partition
-    script.Print("Verifying %s..." % (partition,))
-    ranges = self.tgt.care_map
-    ranges_str = ranges.to_string_raw()
-    script.AppendExtra('range_sha1("%s", "%s") == "%s" && '
-                       'ui_print("    Verified.") || '
-                       'ui_print("\\"%s\\" has unexpected contents.");' % (
-                       self.device, ranges_str,
-                       self.tgt.TotalSha1(include_clobbered_blocks=True),
-                       self.device))
-    script.AppendExtra("")
-
   def WriteVerifyScript(self, script):
     partition = self.partition
     if not self.src:
@@ -1359,14 +1279,7 @@ class BlockDifference(object):
     else:
       ranges = self.src.care_map.subtract(self.src.clobbered_blocks)
       ranges_str = ranges.to_string_raw()
-      if self.version >= 4:
-        script.AppendExtra(('if (range_sha1("%s", "%s") == "%s" || '
-                            'block_image_verify("%s", '
-                            'package_extract_file("%s.transfer.list"), '
-                            '"%s.new.dat", "%s.patch.dat")) then') % (
-                            self.device, ranges_str, self.src.TotalSha1(),
-                            self.device, partition, partition, partition))
-      elif self.version == 3:
+      if self.version >= 3:
         script.AppendExtra(('if (range_sha1("%s", "%s") == "%s" || '
                             'block_image_verify("%s", '
                             'package_extract_file("%s.transfer.list"), '
@@ -1379,36 +1292,22 @@ class BlockDifference(object):
       script.Print('Verified %s image...' % (partition,))
       script.AppendExtra('else')
 
-      if self.version >= 4:
-
-        # Bug: 21124327
-        # When generating incrementals for the system and vendor partitions in
-        # version 4 or newer, explicitly check the first block (which contains
-        # the superblock) of the partition to see if it's what we expect. If
-        # this check fails, give an explicit log message about the partition
-        # having been remounted R/W (the most likely explanation).
-        if self.check_first_block:
-          script.AppendExtra('check_first_block("%s");' % (self.device,))
-
-        # If version >= 4, try block recovery before abort update
-        script.AppendExtra((
-            'ifelse (block_image_recover("{device}", "{ranges}") && '
-            'block_image_verify("{device}", '
-            'package_extract_file("{partition}.transfer.list"), '
-            '"{partition}.new.dat", "{partition}.patch.dat"), '
-            'ui_print("{partition} recovered successfully."), '
-            'abort("{partition} partition fails to recover"));\n'
-            'endif;').format(device=self.device, ranges=ranges_str,
-                             partition=partition))
+      # When generating incrementals for the system and vendor partitions,
+      # explicitly check the first block (which contains the superblock) of
+      # the partition to see if it's what we expect. If this check fails,
+      # give an explicit log message about the partition having been
+      # remounted R/W (the most likely explanation) and the need to flash to
+      # get OTAs working again.
+      if self.check_first_block:
+        self._CheckFirstBlock(script)
 
       # Abort the OTA update. Note that the incremental OTA cannot be applied
       # even if it may match the checksum of the target partition.
       # a) If version < 3, operations like move and erase will make changes
       #    unconditionally and damage the partition.
       # b) If version >= 3, it won't even reach here.
-      else:
-        script.AppendExtra(('abort("%s partition has unexpected contents");\n'
-                            'endif;') % (partition,))
+      script.AppendExtra(('abort("%s partition has unexpected contents");\n'
+                          'endif;') % (partition,))
 
   def _WritePostInstallVerifyScript(self, script):
     partition = self.partition
@@ -1477,8 +1376,21 @@ class BlockDifference(object):
 
     return ctx.hexdigest()
 
+  # TODO(tbao): Due to http://b/20939131, block 0 may be changed without
+  # remounting R/W. Will change the checking to a finer-grained way to
+  # mask off those bits.
+  def _CheckFirstBlock(self, script):
+    r = rangelib.RangeSet((0, 1))
+    srchash = self._HashBlocks(self.src, r)
+
+    script.AppendExtra(('(range_sha1("%s", "%s") == "%s") || '
+                        'abort("%s has been remounted R/W; '
+                        'reflash device to reenable OTA updates");')
+                       % (self.device, r.to_string_raw(), srchash,
+                          self.device))
 
 DataImage = blockimgdiff.DataImage
+
 
 # map recovery.fstab's fs_types to mount/format "partition types"
 PARTITION_TYPES = {
@@ -1487,7 +1399,10 @@ PARTITION_TYPES = {
     "ext4": "EMMC",
     "emmc": "EMMC",
     "f2fs": "EMMC",
-    "squashfs": "EMMC"
+    "squashfs": "EMMC",
+    "ext2": "EMMC",
+    "ext3": "EMMC",
+    "vfat": "EMMC"
 }
 
 def GetTypeAndDevice(mount_point, info):
@@ -1501,16 +1416,18 @@ def GetTypeAndDevice(mount_point, info):
 
 def ParseCertificate(data):
   """Parse a PEM-format certificate."""
+  from codecs import decode
   cert = []
   save = False
   for line in data.split("\n"):
     if "--END CERTIFICATE--" in line:
       break
     if save:
-      cert.append(line)
+      l = line.encode() if hasattr(line, 'encode') else line
+      cert.append(l)
     if "--BEGIN CERTIFICATE--" in line:
       save = True
-  cert = "".join(cert).decode('base64')
+  cert = decode(b"".join(cert), 'base64')
   return cert
 
 def MakeRecoveryPatch(input_dir, output_sink, recovery_img, boot_img,
@@ -1530,25 +1447,18 @@ def MakeRecoveryPatch(input_dir, output_sink, recovery_img, boot_img,
   if info_dict is None:
     info_dict = OPTIONS.info_dict
 
-  full_recovery_image = info_dict.get("full_recovery_image", None) == "true"
-  system_root_image = info_dict.get("system_root_image", None) == "true"
-
-  if full_recovery_image:
-    output_sink("etc/recovery.img", recovery_img.data)
-
+  diff_program = ["imgdiff"]
+  path = os.path.join(input_dir, "SYSTEM", "etc", "recovery-resource.dat")
+  if os.path.exists(path):
+    diff_program.append("-b")
+    diff_program.append(path)
+    bonus_args = "-b /system/etc/recovery-resource.dat"
   else:
-    diff_program = ["imgdiff"]
-    path = os.path.join(input_dir, "SYSTEM", "etc", "recovery-resource.dat")
-    if os.path.exists(path):
-      diff_program.append("-b")
-      diff_program.append(path)
-      bonus_args = "-b /system/etc/recovery-resource.dat"
-    else:
-      bonus_args = ""
+    bonus_args = ""
 
-    d = Difference(recovery_img, boot_img, diff_program=diff_program)
-    _, _, patch = d.ComputePatch()
-    output_sink("recovery-from-boot.p", patch)
+  d = Difference(recovery_img, boot_img, diff_program=diff_program)
+  _, _, patch = d.ComputePatch()
+  output_sink("recovery-from-boot.p", patch)
 
   try:
     # The following GetTypeAndDevice()s need to use the path in the target
@@ -1558,19 +1468,11 @@ def MakeRecoveryPatch(input_dir, output_sink, recovery_img, boot_img,
   except KeyError:
     return
 
-  if full_recovery_image:
-    sh = """#!/system/bin/sh
-if ! applypatch -c %(type)s:%(device)s:%(size)d:%(sha1)s; then
-  applypatch /system/etc/recovery.img %(type)s:%(device)s %(sha1)s %(size)d && log -t recovery "Installing new recovery image: succeeded" || log -t recovery "Installing new recovery image: failed"
-else
-  log -t recovery "Recovery image already installed"
+  sh = """#!/system/bin/sh
+if [ -f /system/etc/recovery-transform.sh ]; then
+  exec sh /system/etc/recovery-transform.sh %(recovery_size)d %(recovery_sha1)s %(boot_size)d %(boot_sha1)s
 fi
-""" % {'type': recovery_type,
-       'device': recovery_device,
-       'sha1': recovery_img.sha1,
-       'size': recovery_img.size}
-  else:
-    sh = """#!/system/bin/sh
+
 if ! applypatch -c %(recovery_type)s:%(recovery_device)s:%(recovery_size)d:%(recovery_sha1)s; then
   applypatch %(bonus_args)s %(boot_type)s:%(boot_device)s:%(boot_size)d:%(boot_sha1)s %(recovery_type)s:%(recovery_device)s %(recovery_sha1)s %(recovery_size)d %(boot_sha1)s:/system/recovery-from-boot.p && log -t recovery "Installing new recovery image: succeeded" || log -t recovery "Installing new recovery image: failed"
 else
@@ -1587,31 +1489,18 @@ fi
        'bonus_args': bonus_args}
 
   # The install script location moved from /system/etc to /system/bin
-  # in the L release.  Parse init.*.rc files to find out where the
+  # in the L release.  Parse the init.rc file to find out where the
   # target-files expects it to be, and put it there.
   sh_location = "etc/install-recovery.sh"
-  found = False
-  if system_root_image:
-    init_rc_dir = os.path.join(input_dir, "ROOT")
-  else:
-    init_rc_dir = os.path.join(input_dir, "BOOT", "RAMDISK")
-  init_rc_files = os.listdir(init_rc_dir)
-  for init_rc_file in init_rc_files:
-    if (not init_rc_file.startswith('init.') or
-        not init_rc_file.endswith('.rc')):
-      continue
-
-    with open(os.path.join(init_rc_dir, init_rc_file)) as f:
+  try:
+    with open(os.path.join(input_dir, "BOOT", "RAMDISK", "init.rc")) as f:
       for line in f:
         m = re.match(r"^service flash_recovery /system/(\S+)\s*$", line)
         if m:
           sh_location = m.group(1)
-          found = True
+          print("putting script in", sh_location)
           break
-
-    if found:
-      break
-
-  print "putting script in", sh_location
+  except (OSError, IOError) as e:
+    print("failed to read init.rc: %s" % e)
 
   output_sink(sh_location, sh)

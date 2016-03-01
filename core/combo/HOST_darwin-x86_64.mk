@@ -36,10 +36,6 @@ HOST_TOOLCHAIN_PREFIX := $(HOST_TOOLCHAIN_ROOT)/bin/i686-apple-darwin$(gcc_darwi
 HOST_CC  := $(HOST_TOOLCHAIN_PREFIX)-gcc
 HOST_CXX := $(HOST_TOOLCHAIN_PREFIX)-g++
 
-define $(combo_var_prefix)transform-shared-lib-to-toc
-$(call _gen_toc_command_for_macho,$(1),$(2))
-endef
-
 # gcc location for clang; to be updated when clang is updated
 # HOST_TOOLCHAIN_ROOT is a Darwin-specific define
 HOST_TOOLCHAIN_FOR_CLANG := $(HOST_TOOLCHAIN_ROOT)
@@ -47,7 +43,13 @@ HOST_TOOLCHAIN_FOR_CLANG := $(HOST_TOOLCHAIN_ROOT)
 HOST_AR := $(AR)
 
 HOST_GLOBAL_CFLAGS += -isysroot $(mac_sdk_root) -mmacosx-version-min=$(mac_sdk_version) -DMACOSX_DEPLOYMENT_TARGET=$(mac_sdk_version)
+ifeq (,$(wildcard $(mac_sdk_path)/Toolchains/XcodeDefault.xctoolchain/usr/include/c++/v1))
+# libc++ header locations for XCode CLT 7.1+
+HOST_GLOBAL_CPPFLAGS += -isystem $(mac_sdk_path)/usr/include/c++/v1
+else
+# libc++ header locations for pre-XCode CLT 7.1+
 HOST_GLOBAL_CPPFLAGS += -isystem $(mac_sdk_path)/Toolchains/XcodeDefault.xctoolchain/usr/include/c++/v1
+endif
 HOST_GLOBAL_LDFLAGS += -isysroot $(mac_sdk_root) -Wl,-syslibroot,$(mac_sdk_root) -mmacosx-version-min=$(mac_sdk_version)
 
 HOST_GLOBAL_CFLAGS += -fPIC -funwind-tables
@@ -55,6 +57,9 @@ HOST_NO_UNDEFINED_LDFLAGS := -Wl,-undefined,error
 
 HOST_SHLIB_SUFFIX := .dylib
 HOST_JNILIB_SUFFIX := .jnilib
+
+HOST_GLOBAL_CFLAGS += \
+    -include $(call select-android-config-h,darwin-x86)
 
 HOST_GLOBAL_ARFLAGS := cqs
 

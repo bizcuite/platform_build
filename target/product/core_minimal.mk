@@ -63,6 +63,7 @@ PRODUCT_PACKAGES += \
     libfilterfw \
     libkeystore \
     libgatekeeper \
+    libsqlite_jni \
     libwilhelm \
     logd \
     make_ext4fs \
@@ -82,7 +83,6 @@ PRODUCT_COPY_FILES += \
 
 # The order of PRODUCT_BOOT_JARS matters.
 PRODUCT_BOOT_JARS := \
-    core-oj \
     core-libart \
     conscrypt \
     okhttp \
@@ -107,7 +107,7 @@ PRODUCT_PACKAGES += \
     e2fsck \
     make_ext4fs \
     fsck.f2fs \
-    make_f2fs \
+    mkfs.f2fs \
 
 PRODUCT_DEFAULT_PROPERTY_OVERRIDES += \
     ro.zygote=zygote32

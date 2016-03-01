@@ -10,6 +10,11 @@ ifneq (,$(filter krait,$(TARGET_$(combo_2nd_arch_prefix)CPU_VARIANT)))
   CLANG_CONFIG_arm_EXTRA_CFLAGS += -mcpu=krait -mfpu=neon-vfpv4
 endif
 
+ifeq ($(HOST_OS),darwin)
+  # Darwin is really bad at dealing with idiv/sdiv. Don't use krait on Darwin.
+  CLANG_CONFIG_arm_EXTRA_CFLAGS += -mcpu=cortex-a9
+endif
+
 CLANG_CONFIG_arm_EXTRA_CPPFLAGS :=
 
 CLANG_CONFIG_arm_EXTRA_LDFLAGS :=
@@ -29,7 +34,8 @@ CLANG_CONFIG_arm_UNKNOWN_CFLAGS := \
   -fno-partial-inlining \
   -fno-strict-volatile-bitfields \
   -fno-tree-copy-prop \
-  -fno-tree-loop-optimize
+  -fno-tree-loop-optimize \
+  -Wa,--noexecstack
 
 define subst-clang-incompatible-arm-flags
   $(subst -march=armv5te,-march=armv5t,\
